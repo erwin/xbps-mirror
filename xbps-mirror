@@ -118,78 +118,78 @@ function time_ago() {
 # void-linux/xbps mirrors are all synced within 24-hours of the master
 # See: https://grafana.s.voidlinux.org/d/cLraC-XMk/mirrors-status
 function check_mirror() {
-	if [ -f "$SCRIPT_DIR/.mirror" ]; then
-    dt=$(date -r "$SCRIPT_DIR/.mirror" +"%Y-%m-%d %H:%M:%S")
-    ago=$(time_ago "${dt}")
-    echo "Cached ${SCRIPT_DIR}/.mirror Exists -- Generated: $ago"
-		MIRROR_URL=$(<"$SCRIPT_DIR/.mirror")
-	else
-		index="current/x86_64-repodata"
-		urls=()
-		locs=()
-		speeds=()
-		connects=()
+  index="current/x86_64-repodata"
+  urls=()
+  locs=()
+  speeds=()
+  connects=()
 
-		if [ ! -f "$SCRIPT_DIR/.urls" ]; then
-			echo "Getting list of Mirrors from Github"
-      echo
-			curl_out=$(curl --url "https://github.com/void-linux/void-docs/raw/master/src/xbps/repositories/mirrors/index.md" \
-									--location --progress-bar)
-			while [[ $curl_out =~ \<(https?://[^\>]+)\>[[:space:]]*$'|'[[:space:]]*([^$'|']*)[[:space:]]*$'|' ]]; do
-				curl_out=${curl_out#*${BASH_REMATCH[0]}};
-				urls+=("${BASH_REMATCH[1]}")
-				locs+=("${BASH_REMATCH[2]}")
-			done
-
-			for ((idx=0; idx<${#urls[@]}; ++idx)); do
-				echo "$(( $idx + 1 )) of ${#urls[@]}: ${urls[idx]} => ${locs[idx]}"
-				set +e
-				curl_out=$(curl --url "${urls[idx]}/$index" \
-										--no-show-error \
-										--connect-timeout 1 --max-time 4 --progress-bar \
-										--write-out "%{time_appconnect}\t%{speed_download}" \
-										--output /dev/null)
-				#						--speed-limit $(( 1024 * 1024 )) \
-				set -e
-				if [ $? -eq 0 ]; then
-					connects[$idx]="${curl_out%$'\t'*}"
-					speeds[$idx]="${curl_out#*$'\t'}"
-				fi
-			done
-			# TODO: improve basic caching in case we have an error with the 
-			#       sorting or selection of speed/mirror values
-			printf "%s\n" "${urls[@]}" > "$SCRIPT_DIR/.urls"
-			printf "%s\n" "${locs[@]}" > "$SCRIPT_DIR/.locs"
-			printf "%s\n" "${speeds[@]}" > "$SCRIPT_DIR/.speeds"
-			printf "%s\n" "${connects[@]}" > "$SCRIPT_DIR/.connects"
-		else 
-			readarray -t urls <"$SCRIPT_DIR/.urls"
-			readarray -t locs <"$SCRIPT_DIR/.locs"
-			readarray -t speeds <"$SCRIPT_DIR/.speeds"
-			readarray -t connects <"$SCRIPT_DIR/.connects"
-		fi
-
-		readarray -t speed_sorted_idx < <(echo "${speeds[@]}" | tr ' ' '\n' | cat --number | sort --numeric-sort --reverse --key=+2 | cut -f1)
-
-		for ((idx=0; idx<${#speed_sorted_idx[@]}; ++idx)); do
-			spd_idx=$(( ${speed_sorted_idx[$idx]} - 1))
-			choose_mirror+=("$( printf "%2d" $(( $idx + 1 )) ):	$( printf "%8d" ${speeds[$spd_idx]} )	${locs[$spd_idx]}	# ${urls[$spd_idx]}")
-		done
-
-    echo "Your currently selected REPO is: $REPO_HOST"
+  if [ ! -f "$SCRIPT_DIR/.urls" ]; then
+    echo "Getting list of Mirrors from Github"
     echo
+    curl_out=$(curl --url "https://github.com/void-linux/void-docs/raw/master/src/xbps/repositories/mirrors/index.md" \
+                --location --progress-bar)
+    while [[ $curl_out =~ \<(https?://[^\>]+)\>[[:space:]]*$'|'[[:space:]]*([^$'|']*)[[:space:]]*$'|' ]]; do
+      curl_out=${curl_out#*${BASH_REMATCH[0]}};
+      urls+=("${BASH_REMATCH[1]}")
+      locs+=("${BASH_REMATCH[2]}")
+    done
 
-		if [ ${#choose_mirror[@]} -gt 1 ]; then
-			tabs 5,15,35,45
-			fuzzy_finder "${choose_mirror[@]}"
-			if [[ $? -eq 0 && -n "$retval" ]]; then
-				MIRROR_URL="${retval##*#}/current/"
-				echo $MIRROR_URL > "$SCRIPT_DIR/.mirror"
-        sudo SCRIPT_DIR=$SCRIPT_DIR $SCRIPT_PATH --write
-			fi
-			tabs -8
-		fi
-	fi
+    for ((idx=0; idx<${#urls[@]}; ++idx)); do
+      echo "$(( $idx + 1 )) of ${#urls[@]}: ${urls[idx]} => ${locs[idx]}"
+      set +e
+      curl_out=$(curl --url "${urls[idx]}/$index" \
+                  --no-show-error \
+                  --connect-timeout 1 --max-time 4 --progress-bar \
+                  --write-out "%{time_appconnect}\t%{speed_download}" \
+                  --output /dev/null)
+      #						--speed-limit $(( 1024 * 1024 )) \
+      set -e
+      if [ $? -eq 0 ]; then
+        connects[$idx]="${curl_out%$'\t'*}"
+        speeds[$idx]="${curl_out#*$'\t'}"
+      fi
+    done
+    # TODO: improve basic caching in case we have an error with the 
+    #       sorting or selection of speed/mirror values
+    printf "%s\n" "${urls[@]}" > "$SCRIPT_DIR/.urls"
+    printf "%s\n" "${locs[@]}" > "$SCRIPT_DIR/.locs"
+    printf "%s\n" "${speeds[@]}" > "$SCRIPT_DIR/.speeds"
+    printf "%s\n" "${connects[@]}" > "$SCRIPT_DIR/.connects"
+  else 
+    dt=$(date -r "$SCRIPT_DIR/.urls" +"%Y-%m-%d %H:%M:%S")
+    ago=$(time_ago "${dt}")
+    echo "Cached ${SCRIPT_DIR}/.urls Exists -- Generated: $ago"
+    echo "Refresh cache with: "
+    echo "	$0 --refresh"
+    echo
+    #MIRROR_URL=$(<"$SCRIPT_DIR/.mirror")
+    readarray -t urls <"$SCRIPT_DIR/.urls"
+    readarray -t locs <"$SCRIPT_DIR/.locs"
+    readarray -t speeds <"$SCRIPT_DIR/.speeds"
+    readarray -t connects <"$SCRIPT_DIR/.connects"
+  fi
+
+  readarray -t speed_sorted_idx < <(echo "${speeds[@]}" | tr ' ' '\n' | cat --number | sort --numeric-sort --reverse --key=+2 | cut -f1)
+
+  for ((idx=0; idx<${#speed_sorted_idx[@]}; ++idx)); do
+    spd_idx=$(( ${speed_sorted_idx[$idx]} - 1))
+    choose_mirror+=("$( printf "%2d" $(( $idx + 1 )) ):	$( printf "%8d" ${speeds[$spd_idx]} )	${locs[$spd_idx]}	# ${urls[$spd_idx]}")
+  done
+
+  echo "Your currently selected MIRROR is: $REPO_HOST"
+  echo
+
+  if [ ${#choose_mirror[@]} -gt 1 ]; then
+    tabs 5,15,35,45
+    fuzzy_finder "${choose_mirror[@]}"
+    if [[ $? -eq 0 && -n "$retval" ]]; then
+      MIRROR_URL="${retval##*#}/current/"
+      echo $MIRROR_URL > "$SCRIPT_DIR/.mirror"
+      sudo SCRIPT_DIR=$SCRIPT_DIR $SCRIPT_PATH --write
+    fi
+    tabs -8
+  fi
 }
 
 function check_root() {
@@ -240,7 +240,6 @@ case "$1" in
     write_file
     ;;
 	*)
-    echo "Use $0 --refresh to reload mirror list and re-test speed to each server"
 		# preserve all command line arguments
 		get_config
 		rm -f "$SCRIPT_DIR/.mirror"
