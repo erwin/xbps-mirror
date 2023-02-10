@@ -1,0 +1,251 @@
+#!/bin/bash
+
+
+function print_usage() {
+	cat <<EOF
+	$PROGNAME: find the fastest mirror for xbps
+
+	--help:     This help/usage message
+
+  --refresh:  Reload the mirror list and re-test speed to each mirror
+	
+EOF
+}
+
+function check_depends() {
+	for app in $* ; do
+		if ! command -v "${app}" &>/dev/null; then
+			not_available+=("${app}")
+		fi
+	done
+
+	if (( ${#not_available[@]} > 0)); then
+		err="Please first install missing dependencies:\n"
+		for app in ${not_available[@]} ; do
+			err+="- '${app}'\n"
+		done
+		err+="\n"
+		msg_error "${err}"
+	fi
+}
+
+function get_config() {
+  SCRIPT_DIR="${SCRIPT_DIR:-${HOME}/.cache/xbps-mirror/}"
+  #REGEX="^[[:space:]]*repository[[:space:]]*=[[:space:]]*([A-Za-z0-9]+)://([A-Za-z0-9._\-]+)/([A-Za-z0-9./_\-]*)"
+  mkdir -p $SCRIPT_DIR
+	PROGNAME="${0##*/}"
+	SCRIPT_PATH=$(readlink -f -- "$0")
+	CWD=$(pwd)
+	if [ -f "$SCRIPT_DIR/config" ]; then
+		# shellcheck disable=SC1091
+		source "$SCRIPT_DIR/config"
+	fi
+  xbps_files=$(find /etc/xbps.d/ -type f | sort -n)
+  for file in ${xbps_files}; do
+    #echo "Searching $file"
+    content=$(cat "$file")
+    while read line; do
+      if [[ "$line" =~ ^[[:space:]]*repository[[:space:]]*=[[:space:]]*([A-Za-z0-9]+)://([A-Za-z0-9._\-]+)/([A-Za-z0-9./_\-]*) ]]; then
+      #if [[ "$line" =~ $REGEX ]]; then
+        REPO_PROTO=${BASH_REMATCH[1]}
+        REPO_HOST=${BASH_REMATCH[2]}
+        REPO_PATH=${BASH_REMATCH[3]}
+        REPO=${REPO_PROTO}://${REPO_HOST}/${REPO_PATH}
+        REPO_FILE=$file
+        #echo "Repo Proto: $REPO_PROTO Host: $REPO_HOST Path: $REPO_PATH ($REPO)"
+      fi
+    done < "${file}"
+    if [ ! -z $REPO ]; then
+      break
+    fi
+  done
+}
+
+function fuzzy_finder() {
+	items=("$@")
+	if command -v sk &> /dev/null; then
+		retval=$(printf "%s\n" "${items[@]}" | sk)
+	elif command -v fzy &> /dev/null; then
+		retval=$(printf "%s\n" "${items[@]}" | fzy)
+	elif command -v fzf &> /dev/null; then
+		retval=$(printf "%s\n" "${items[@]}" | fzf)
+	else
+		for each in "${items[@]}"; do
+			echo "$each"
+		done
+		read retval
+	fi
+}
+
+function time_ago() {
+    local SEC_PER_MINUTE=$((60))
+    local   SEC_PER_HOUR=$((60*60))
+    local    SEC_PER_DAY=$((60*60*24))
+    local  SEC_PER_MONTH=$((60*60*24*30))
+    local   SEC_PER_YEAR=$((60*60*24*365))
+
+    local last_unix="$(date --date="$1" +%s)"    # convert date to unix timestamp
+    local now_unix="$(date +'%s')"
+
+    local delta_s=$(( now_unix - last_unix ))
+
+    if (( delta_s <  SEC_PER_MINUTE * 2))
+    then
+        echo $((delta_s))" seconds ago"
+        return 
+    elif (( delta_s <  SEC_PER_HOUR * 2))
+    then
+        echo $((delta_s / SEC_PER_MINUTE))" minutes ago"
+        return 
+    elif (( delta_s <  SEC_PER_DAY * 2))
+    then
+        echo $((delta_s / SEC_PER_HOUR))" hours ago"
+        return 
+    elif (( delta_s <  SEC_PER_MONTH * 2))
+    then
+        echo $((delta_s / SEC_PER_DAY))" days ago"
+        return 
+    elif (( delta_s <  SEC_PER_YEAR * 2))
+    then
+        echo $((delta_s / SEC_PER_MONTH))" months ago"
+        return 
+    else
+        echo $((delta_s / SEC_PER_YEAR))" years ago"
+        return 
+    fi
+}
+
+# void-linux/xbps mirrors are all synced within 24-hours of the master
+# See: https://grafana.s.voidlinux.org/d/cLraC-XMk/mirrors-status
+function check_mirror() {
+	if [ -f "$SCRIPT_DIR/.mirror" ]; then
+    dt=$(date -r "$SCRIPT_DIR/.mirror" +"%Y-%m-%d %H:%M:%S")
+    ago=$(time_ago "${dt}")
+    echo "Cached ${SCRIPT_DIR}/.mirror Exists -- Generated: $ago"
+		MIRROR_URL=$(<"$SCRIPT_DIR/.mirror")
+	else
+		index="current/x86_64-repodata"
+		urls=()
+		locs=()
+		speeds=()
+		connects=()
+
+		if [ ! -f "$SCRIPT_DIR/.urls" ]; then
+			echo "Getting list of Mirrors from Github"
+      echo
+			curl_out=$(curl --url "https://github.com/void-linux/void-docs/raw/master/src/xbps/repositories/mirrors/index.md" \
+									--location --progress-bar)
+			while [[ $curl_out =~ \<(https?://[^\>]+)\>[[:space:]]*$'|'[[:space:]]*([^$'|']*)[[:space:]]*$'|' ]]; do
+				curl_out=${curl_out#*${BASH_REMATCH[0]}};
+				urls+=("${BASH_REMATCH[1]}")
+				locs+=("${BASH_REMATCH[2]}")
+			done
+
+			for ((idx=0; idx<${#urls[@]}; ++idx)); do
+				echo "$(( $idx + 1 )) of ${#urls[@]}: ${urls[idx]} => ${locs[idx]}"
+				set +e
+				curl_out=$(curl --url "${urls[idx]}/$index" \
+										--no-show-error \
+										--connect-timeout 1 --max-time 4 --progress-bar \
+										--write-out "%{time_appconnect}\t%{speed_download}" \
+										--output /dev/null)
+				#						--speed-limit $(( 1024 * 1024 )) \
+				set -e
+				if [ $? -eq 0 ]; then
+					connects[$idx]="${curl_out%$'\t'*}"
+					speeds[$idx]="${curl_out#*$'\t'}"
+				fi
+			done
+			# TODO: improve basic caching in case we have an error with the 
+			#       sorting or selection of speed/mirror values
+			printf "%s\n" "${urls[@]}" > "$SCRIPT_DIR/.urls"
+			printf "%s\n" "${locs[@]}" > "$SCRIPT_DIR/.locs"
+			printf "%s\n" "${speeds[@]}" > "$SCRIPT_DIR/.speeds"
+			printf "%s\n" "${connects[@]}" > "$SCRIPT_DIR/.connects"
+		else 
+			readarray -t urls <"$SCRIPT_DIR/.urls"
+			readarray -t locs <"$SCRIPT_DIR/.locs"
+			readarray -t speeds <"$SCRIPT_DIR/.speeds"
+			readarray -t connects <"$SCRIPT_DIR/.connects"
+		fi
+
+		readarray -t speed_sorted_idx < <(echo "${speeds[@]}" | tr ' ' '\n' | cat --number | sort --numeric-sort --reverse --key=+2 | cut -f1)
+
+		for ((idx=0; idx<${#speed_sorted_idx[@]}; ++idx)); do
+			spd_idx=$(( ${speed_sorted_idx[$idx]} - 1))
+			choose_mirror+=("$( printf "%2d" $(( $idx + 1 )) ):	$( printf "%8d" ${speeds[$spd_idx]} )	${locs[$spd_idx]}	# ${urls[$spd_idx]}")
+		done
+
+    echo "Your currently selected REPO is: $REPO_HOST"
+    echo
+
+		if [ ${#choose_mirror[@]} -gt 1 ]; then
+			tabs 5,15,35,45
+			fuzzy_finder "${choose_mirror[@]}"
+			if [[ $? -eq 0 && -n "$retval" ]]; then
+				MIRROR_URL="${retval##*#}/current/"
+				echo $MIRROR_URL > "$SCRIPT_DIR/.mirror"
+        sudo SCRIPT_DIR=$SCRIPT_DIR $SCRIPT_PATH --write
+			fi
+			tabs -8
+		fi
+	fi
+}
+
+function check_root() {
+  if [[ $EUID > 0 ]]; then
+    echo "Please run as root/sudo"
+    exit 1
+  fi
+}
+
+function write_file() {
+  mirror=$(cat $SCRIPT_DIR/.mirror)
+  if [ -z "${REPO_FILE}" ]; then
+    echo "REPO_FILE must be defined"
+    exit 1
+  fi
+  if [ ! -f "${REPO_FILE}" ]; then
+    echo "Can not find /etc/xbps.d/ config file"
+    exit 1
+  fi
+
+  while read line; do
+    if [[ "$line" =~ ^[[:space:]]*repository[[:space:]]*=[[:space:]]*([A-Za-z0-9]+)://([A-Za-z0-9._\-]+)/([A-Za-z0-9./_\-]*) ]]; then
+    #if [[ "$line" =~ $REGEX ]]; then
+      echo "# $line"
+    else
+      echo "$line"
+    fi
+  done < "${REPO_FILE}" > "${REPO_FILE}.tmp"
+  echo "repository=${mirror}" >> "${REPO_FILE}.tmp"
+  mv "${REPO_FILE}.tmp" "${REPO_FILE}"
+}
+
+# Main switch.
+check_depends curl
+case "$1" in
+	"--help")
+		get_config
+		print_usage
+		;;
+	"--refresh")
+		get_config
+		rm -f "$SCRIPT_DIR/.mirror" "$SCRIPT_DIR/.urls"
+		check_mirror
+		;;
+  "--write")
+		get_config
+    check_root
+    write_file
+    ;;
+	*)
+    echo "Use $0 --refresh to reload mirror list and re-test speed to each server"
+		# preserve all command line arguments
+		get_config
+		rm -f "$SCRIPT_DIR/.mirror"
+		check_mirror
+		#do_run
+		#[ $? -eq 0 ] && do_update_check
+		;;
+esac
